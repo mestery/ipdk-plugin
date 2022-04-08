@@ -26,9 +26,12 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/01org/ciao/uuid"
@@ -38,6 +41,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
+	"github.com/vishvananda/netns"
 )
 
 type epVal struct {
@@ -72,6 +76,8 @@ var brMap struct {
 
 var dbFile string
 var db *bolt.DB
+
+const switchNS = "switch"
 
 func init() {
 	epMap.m = make(map[string]*epVal)
@@ -837,6 +843,23 @@ func main() {
 
 	godotenv.Load("~/.ipdk/ipdk.env")
 
+	// Create namespace
+	if _, err := netns.NewNamed(switchNS); err != nil {
+		glog.Fatalf("error creating %s namespace", switchNS)
+	}
+
+	// Delete namespace on ctrl-c
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		// Run Cleanup
+		if err := netns.DeleteNamed(switchNS); err != nil {
+			glog.Errorf("error closing network namespace %s", switchNS)
+		}
+		os.Exit(1)
+	}()
+
 	if err := initDb(); err != nil {
 		glog.Fatalf("db init failed, quitting [%v]", err)
 	}
@@ -870,5 +893,9 @@ func main() {
 	err := http.ListenAndServe("127.0.0.1:9075", r)
 	if err != nil {
 		glog.Errorf("docker plugin http server failed, [%v]", err)
+	}
+
+	if err := netns.DeleteNamed(switchNS); err != nil {
+		glog.Errorf("error closing network namespace %s", switchNS)
 	}
 }
