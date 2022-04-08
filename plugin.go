@@ -36,11 +36,12 @@ import (
 
 	"github.com/01org/ciao/uuid"
 	"github.com/boltdb/bolt"
-	"github.com/docker/libnetwork/drivers/remote/api"
+	"github.com/moby/libnetwork/drivers/remote/api"
 	ipamapi "github.com/docker/libnetwork/ipams/remote/api"
 	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
+	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 )
 
@@ -78,6 +79,7 @@ var dbFile string
 var db *bolt.DB
 
 const switchNS = "switch"
+const dummyName = "psa_recirc"
 
 func init() {
 	epMap.m = make(map[string]*epVal)
@@ -467,43 +469,11 @@ func handlerDiscoverDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlerExternalConnectivity(w http.ResponseWriter, r *http.Request) {
-	resp := api.ProgramExternalConnectivityResponse{}
-
-	body, err := getBody(r)
-	if err != nil {
-		resp.Err = "Error: " + err.Error()
-		sendResponse(resp, w)
-		return
-	}
-
-	req := api.ProgramExternalConnectivityRequest{}
-	if err := json.Unmarshal(body, &req); err != nil {
-		resp.Err = "Error: " + err.Error()
-		sendResponse(resp, w)
-		return
-	}
-
-	sendResponse(resp, w)
+	return
 }
 
 func handlerRevokeExternalConnectivity(w http.ResponseWriter, r *http.Request) {
-	resp := api.RevokeExternalConnectivityResponse{}
-
-	body, err := getBody(r)
-	if err != nil {
-		resp.Err = "Error: " + err.Error()
-		sendResponse(resp, w)
-		return
-	}
-
-	req := api.RevokeExternalConnectivityResponse{}
-	if err := json.Unmarshal(body, &req); err != nil {
-		resp.Err = "Error: " + err.Error()
-		sendResponse(resp, w)
-		return
-	}
-
-	sendResponse(resp, w)
+	return
 }
 
 func ipamGetCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -839,12 +809,15 @@ func programP4() error {
 }
 
 func main() {
+	var nsID netns.NsHandle
+	var err error
+
 	flag.Parse()
 
 	godotenv.Load("~/.ipdk/ipdk.env")
 
 	// Create namespace
-	if _, err := netns.NewNamed(switchNS); err != nil {
+	if nsID, err = netns.NewNamed(switchNS); err != nil {
 		glog.Fatalf("error creating %s namespace", switchNS)
 	}
 
@@ -857,8 +830,25 @@ func main() {
 		if err := netns.DeleteNamed(switchNS); err != nil {
 			glog.Errorf("error closing network namespace %s", switchNS)
 		}
+		_ = db.Close()
 		os.Exit(1)
 	}()
+	defer netns.DeleteNamed(switchNS)
+
+	// Create dummy recirculation device
+	dummyDev := &netlink.Dummy{}
+	dummyDev.LinkAttrs.Name = dummyName
+	if err = netlink.LinkAdd(dummyDev); err != nil {
+		glog.Fatalf("error creating dummy device %s: [%v]", dummyName, err)
+        }
+	if err = netlink.LinkSetNsFd(dummyDev, int(nsID)); err != nil {
+		glog.Fatalf("error setting link into namespace %s: [%v]", dummyName, err)
+	}
+	switchLoDev := &netlink.Device{}
+	switchLoDev.LinkAttrs.Name = "lo"
+	if err = netlink.LinkSetUp(switchLoDev); err != nil {
+		glog.Fatalf("error setting loopback device up [%v]", err)
+	}
 
 	if err := initDb(); err != nil {
 		glog.Fatalf("db init failed, quitting [%v]", err)
@@ -890,7 +880,7 @@ func main() {
 	r.HandleFunc("/IpamDriver.RequestAddress", ipamRequestAddress)
 
 	r.HandleFunc("/", handler)
-	err := http.ListenAndServe("127.0.0.1:9075", r)
+	err = http.ListenAndServe("127.0.0.1:9075", r)
 	if err != nil {
 		glog.Errorf("docker plugin http server failed, [%v]", err)
 	}
