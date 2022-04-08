@@ -1,21 +1,14 @@
-# ipdk docker network plugin
+# ipdk ebpf docker network plugin
 
-This is simple standalone Docker Plugin implementation to demonstrate Kata
-Containers v1 with [IPDK](https://ipdk.io). NOTE: v1 of Kata Containers has
-been deprecated. The reason we're using this version is that Docker does not
-support the V2 shim API, meaning Kata Containers v2 does not work with Docker
-(or podman, for that matter). See [here](https://github.com/kata-containers/kata-containers/issues/722)
-for more details.
+This is a simple Docker CNM which integrates with the [IPDK](https://ipdk.io)
+project. Specifically, it works with the IPDK P4 eBPF backend.
 
-For more details about Kata Containers v1:
-* [GitHub](https://github.com/kata-containers/kata-containers/tree/1.x-eol)
-
-For more information about IPDL:
+For more information about IPDK:
 * [IPDK Website](https://ipdk.io)
 * [IPDK GitHub](https://github.com/ipdk-io/ipdk)
 
-The docker plugin is used to create the IPDK vhost-user interface inside the IPDK
-docker container, which is attached to the kata container.
+The docker plugin is used to create veth ports between the P4-eBPF switch
+namespace and the container's namespace.
 
 # How to use this plugin
 
@@ -35,12 +28,8 @@ $ sudo cp ipdk.json /etc/docker/plugins/
 2. Start the plugin
 
 ```
-$ sudo ./ipdk-docker-network-plugin&
+$ sudo ./ipdk-plugin&
 ```
         
 Note: Enable password less sudo to ensure the plugin will run in the background without prompting.
 
-3. Try IPDK with Kata Containers v1:
-
-Follow the instructions in the PoC repository to try this out in a Virtualbox
-environment.
