@@ -29,7 +29,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -47,8 +46,12 @@ import (
 
 type epVal struct {
 	IP             string
-	tapPortName    string //The TAP port name
-	ipdkInterface  string
+	vethClientName string
+	vethServerName string
+	vethClientIf   int
+	vethServerIf   int
+	vethClientMac  net.HardwareAddr
+	vethServerMac  net.HardwareAddr
 }
 
 type nwVal struct {
@@ -77,6 +80,7 @@ var brMap struct {
 
 var dbFile string
 var db *bolt.DB
+var nsID netns.NsHandle
 
 const switchNS = "switch"
 const dummyName = "psa_recirc"
@@ -285,53 +289,80 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 	defer brMap.Unlock()
 
 	// Create a unique name and host
-	ipdk_intf := brMap.intfCount
-	brMap.intfCount = brMap.intfCount + 1
-	netnamet := fmt.Sprintf("TAP%d", ipdk_intf)
-	netname := strings.Replace(netnamet, ".", "", -1)
+	vethServer := generateVethName()
+	vethClient := generateVethName()
 
-	//Generate IPDK vhost-user interface:
-	//docker exec -it ipdk gnmi-cli set "device:virtual-device,name:net_vhost0,host:host1,device-type:VIRTIO_NET,queues:1,socket-path:/tmp/vhost-user-0,port-type:LINK"
-	cmd := "docker"
-	args := []string{"exec", "ipdk", "gnmi-cli", "set", fmt.Sprintf("device:virtual-device,name:%s,pipeline-name:pipe,mtu:1500,port-type:TAP", netname)}
-	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
-	//if err := exec.Command(cmd, args...).Run(); err != nil {
-	output, err := exec.Command(cmd, args...).Output()
-	if err != nil {
-		glog.Infof("ERROR: [%v] [%v] [%v] ", cmd, args, err)
-		resp.Err = fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]",
-			cmd, args, err)
+	veth := &netlink.Veth{}
+	veth.LinkAttrs.Name = vethClient
+	veth.PeerName = vethServer
+	veth.PeerNamespace = nsID
+	//veth.PeerHardwareAddr = GenerateMac()
+
+	glog.Infof("Adding veth pair (%s/%s) with nsID %d and MAC %s", vethServer, vethClient, veth.PeerNamespace, veth.PeerHardwareAddr)
+
+	if err := netlink.LinkAdd(veth); err != nil {
+		glog.Infof("ERROR: Cannot add veth device [%v] ", err)
+		resp.Err = fmt.Sprintf("Error creating veth: [%v]", err)
 		sendResponse(resp, w)
 		return
 	}
 
-	ifcb, _, err := bufio.NewReader(bytes.NewReader(output)).ReadLine()
-	ifc := string(ifcb)
-
-	glog.Infof("INFO: Result of gnmi-cli command [%v]", ifc)
-
-	// Run ovs-p4ctl to add a pipeline entry
-	cmd = "docker"
-	args = []string{"exec", "ipdk", "ovs-p4ctl", "add-entry", "br0", "ingress.ipv4_host", fmt.Sprintf("hdr.ipv4.dst_addr=%s,action=ingress.send(%d)", ip, ipdk_intf)}
-	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
-	output, err = exec.Command(cmd, args...).Output()
-	if err != nil {
-		glog.Infof("ERROR: [%v] [%v] [%v] ", cmd, args, err)
-		resp.Err = fmt.Sprintf("Error ovs-p4ctl : [%v] [%v] [%v]",
-			cmd, args, err)
+	l, err := netlink.LinkByName(vethClient)
+	if err != nil{
+		glog.Infof("ERROR: Error getting veth client [%v] ", err)
+		resp.Err = fmt.Sprintf("Error getting veth client: [%v]", err)
+		sendResponse(resp, w)
+		return
+	}
+        if l == nil {
+		glog.Infof("ERROR: Cannot find veth client [%v] ", err)
+		resp.Err = fmt.Sprintf("Cannot find veth client : [%v]", err)
+		sendResponse(resp, w)
+		return
+        }
+	vethClientMac := l.Attrs().HardwareAddr
+	vethClientIf := l.Attrs().Index
+	if err = netlink.LinkSetUp(l); err != nil {
+		glog.Infof("ERROR: Cannot set veth client interface up [%v] ", err)
+		resp.Err = fmt.Sprintf("Cannot set veth client interface up : [%v]", err)
 		sendResponse(resp, w)
 		return
 	}
 
-	ifcb, _, err = bufio.NewReader(bytes.NewReader(output)).ReadLine()
-	ifc = string(ifcb)
+	l, err = netlink.LinkByName(vethServer)
+	if err != nil{
+		glog.Infof("ERROR: Error getting veth server [%v] ", err)
+		resp.Err = fmt.Sprintf("Error getting veth server: [%v]", err)
+		sendResponse(resp, w)
+		return
+	}
+        if l == nil {
+		glog.Infof("ERROR: Cannot find veth server [%v] ", err)
+		resp.Err = fmt.Sprintf("Cannot find veth server : [%v]", err)
+		sendResponse(resp, w)
+		return
+        }
+	vethServerMac := l.Attrs().HardwareAddr
+	vethServerIf := l.Attrs().Index
+	if err = netlink.LinkSetUp(l); err != nil {
+		glog.Infof("ERROR: Cannot set veth server interface up [%v] ", err)
+		resp.Err = fmt.Sprintf("Cannot set veth server interface up : [%v]", err)
+		sendResponse(resp, w)
+		return
+	}
 
-	glog.Infof("INFO: Result of ovs-p4ctl command [%v]", ifc)
+	if err = netlink.LinkSetNsFd(l, int(nsID)); err != nil {
+		glog.Fatalf("error setting vethServer into namespace %s: [%v]", vethServer, err)
+	}
 
 	epMap.m[req.EndpointID] = &epVal{
 		IP:            req.Interface.Address,
-		tapPortName: netname,
-		ipdkInterface:  fmt.Sprintf("%d", brMap.intfCount),
+		vethServerName: vethServer,
+		vethClientName: vethClient,
+		vethClientMac: vethClientMac,
+		vethServerMac: vethServerMac,
+		vethClientIf: vethClientIf,
+		vethServerIf: vethServerIf,
 	}
 
 	if err := dbAdd("epMap", req.EndpointID, epMap.m[req.EndpointID]); err != nil {
@@ -363,6 +394,35 @@ func handlerDeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	m := epMap.m[req.EndpointID]
 
+	// Delete veth devices
+	l, err := netlink.LinkByName(m.vethClientName)
+	if err != nil{
+		glog.Infof("ERROR: Error getting veth server [%v] ", err)
+		resp.Err = fmt.Sprintf("Error getting veth server: [%v]", err)
+		sendResponse(resp, w)
+		return
+	}
+        if l == nil {
+		glog.Infof("ERROR: Cannot find veth server [%v] ", err)
+		resp.Err = fmt.Sprintf("Cannot find veth server : [%v]", err)
+		sendResponse(resp, w)
+		return
+        }
+
+	err = netlink.LinkSetDown(l)
+	if err != nil {
+		resp.Err = "Error: cannot set link " + m.vethClientName + " down" + err.Error()
+		sendResponse(resp, w)
+		return
+	}
+
+	err = netlink.LinkDel(l)
+	if err != nil {
+		resp.Err = "Error: cannot delete link " + m.vethClientName + " down" + err.Error()
+		sendResponse(resp, w)
+		return
+	}
+
 	delete(epMap.m, req.EndpointID)
 	if err := dbDelete("epMap", req.EndpointID); err != nil {
 		glog.Errorf("Unable to update db %v %v", err, m)
@@ -385,6 +445,31 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Here we want to do the following:
+	// 1. psabpf-ctl action-selector add_member pipe "$PIPELINE" DemoIngress_as id 1 data "$SWITCH_SERVER1_PORT_ID" "$SWITCH_SERVER1_PORT_MAC" "$SERVER1_MAC"
+	// 2. psabpf-ctl table add pipe "$PIPELINE" DemoIngress_tbl_routing ref key "$SERVER1_IP/32" data 1
+	// 3. psabpf-ctl table add pipe "$PIPELINE" DemoIngress_tbl_arp_ipv4 id 2 key "$SWITCH_SERVER1_PORT_ID" 1 "$SERVER1_IP/$SERVER1_IP_PREFIX" data "$SWITCH_SERVER1_PORT_MAC"
+
+	//Generate IPDK vhost-user interface:
+	//docker exec -it ipdk gnmi-cli set "device:virtual-device,name:net_vhost0,host:host1,device-type:VIRTIO_NET,queues:1,socket-path:/tmp/vhost-user-0,port-type:LINK"
+	//cmd := "docker"
+	//args := []string{"exec", "ipdk", "gnmi-cli", "set", fmt.Sprintf("device:virtual-device,name:%s,pipeline-name:pipe,mtu:1500,port-type:TAP", netname)}
+	//glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	//if err := exec.Command(cmd, args...).Run(); err != nil {
+	//output, err := exec.Command(cmd, args...).Output()
+	//if err != nil {
+		//glog.Infof("ERROR: [%v] [%v] [%v] ", cmd, args, err)
+		//resp.Err = fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]",
+			//cmd, args, err)
+		//sendResponse(resp, w)
+		//return
+	//}
+
+	//ifcb, _, err := bufio.NewReader(bytes.NewReader(output)).ReadLine()
+	//ifc := string(ifcb)
+
+	//glog.Infof("INFO: Result of gnmi-cli command [%v]", ifc)
+
 	req := api.JoinRequest{}
 	if err := json.Unmarshal(body, &req); err != nil {
 		resp.Err = "Error: " + err.Error()
@@ -401,10 +486,10 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 
 	resp.Gateway = nm.Gateway.IP.String()
 	resp.InterfaceName = &api.InterfaceName{
-		SrcName:   em.tapPortName,
+		SrcName:   em.vethClientName,
 		DstPrefix: "eth",
 	}
-	glog.Infof("Join Response %v %v", resp, em.tapPortName)
+	glog.Infof("Join Response %v %v", resp, em.vethClientName)
 	sendResponse(resp, w)
 }
 
@@ -469,11 +554,16 @@ func handlerDiscoverDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlerExternalConnectivity(w http.ResponseWriter, r *http.Request) {
-	return
+	resp := api.Response{}
+
+	sendResponse(resp, w)
+
 }
 
 func handlerRevokeExternalConnectivity(w http.ResponseWriter, r *http.Request) {
-	return
+	resp := api.Response{}
+
+	sendResponse(resp, w)
 }
 
 func ipamGetCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -809,7 +899,6 @@ func programP4() error {
 }
 
 func main() {
-	var nsID netns.NsHandle
 	var err error
 
 	flag.Parse()
