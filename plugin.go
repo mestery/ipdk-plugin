@@ -905,14 +905,9 @@ func main() {
 
 	godotenv.Load("~/.ipdk/ipdk.env")
 
-	// Create namespace
+	// Check for namespace
 	if nsID, err = netns.GetFromName(switchNS); err != nil {
-		if nsID, err = netns.NewNamed(switchNS); err != nil {
-			glog.Fatalf("error creating %s namespace", switchNS)
-		}
-		defer netns.DeleteNamed(switchNS)
-	} else {
-		glog.Infof("switch namespace already exists")
+		glog.Fatalf("Cannot find %s namespace, exiting [%v]", switchNS, err)
 	}
 
 	// Create dummy recirculation device
@@ -931,10 +926,40 @@ func main() {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
-		// Run Cleanup
-		if err := netns.DeleteNamed(switchNS); err != nil {
-			glog.Errorf("error closing network namespace %s", switchNS)
+
+		var l netlink.Link
+		var ch *netlink.Handle
+		var err error
+
+		// Delete veth devices
+		nh, nerr := netns.GetFromName(switchNS)
+		if nerr != nil {
+			fmt.Printf("ERROR: Cannot get handle to %s namespace [%v]", switchNS, nerr)
+			goto cleanexit
 		}
+		ch, err = netlink.NewHandleAt(nh)
+		if err != nil {
+			fmt.Printf("ERROR: Cannot get handle for namespace [%v]", err)
+			goto cleanexit
+		}
+
+		l, err = ch.LinkByName(dummyName)
+		if err != nil{
+			fmt.Printf("ERROR: Error getting dummy device %s [%v] ", dummyName, err)
+			goto cleanexit
+		}
+		if l == nil {
+			fmt.Printf("ERROR: Cannot find dummy device %s [%v] ", dummyName, err)
+			goto cleanexit
+		}
+
+		err = ch.LinkDel(l)
+		if err != nil {
+			fmt.Printf("ERROR: Cannot delete dummy device %s [%v]", dummyName, err)
+			// Fall through
+		}
+
+		cleanexit:
 		_ = db.Close()
 		os.Exit(1)
 	}()
@@ -978,9 +1003,5 @@ func main() {
 	err = http.ListenAndServe("127.0.0.1:9075", r)
 	if err != nil {
 		glog.Errorf("docker plugin http server failed, [%v]", err)
-	}
-
-	if err := netns.DeleteNamed(switchNS); err != nil {
-		glog.Errorf("error closing network namespace %s", switchNS)
 	}
 }
