@@ -26,11 +26,8 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/01org/ciao/uuid"
@@ -83,7 +80,6 @@ var db *bolt.DB
 var nsID netns.NsHandle
 
 const switchNS = "switch"
-const dummyName = "psa_recirc"
 
 func init() {
 	epMap.m = make(map[string]*epVal)
@@ -909,60 +905,6 @@ func main() {
 	if nsID, err = netns.GetFromName(switchNS); err != nil {
 		glog.Fatalf("Cannot find %s namespace, exiting [%v]", switchNS, err)
 	}
-
-	// Create dummy recirculation device
-	dummyDev := &netlink.Dummy{}
-	dummyDev.LinkAttrs.Name = dummyName
-	if err = netlink.LinkAdd(dummyDev); err != nil {
-		glog.Fatalf("error creating dummy device %s: [%v]", dummyName, err)
-        }
-	if err = netlink.LinkSetNsFd(dummyDev, int(nsID)); err != nil {
-		glog.Fatalf("error setting link into namespace %s: [%v]", dummyName, err)
-	}
-	defer netlink.LinkDel(dummyDev)
-
-	// Delete namespace on ctrl-c
-	c := make(chan os.Signal)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-
-		var l netlink.Link
-		var ch *netlink.Handle
-		var err error
-
-		// Delete veth devices
-		nh, nerr := netns.GetFromName(switchNS)
-		if nerr != nil {
-			fmt.Printf("ERROR: Cannot get handle to %s namespace [%v]", switchNS, nerr)
-			goto cleanexit
-		}
-		ch, err = netlink.NewHandleAt(nh)
-		if err != nil {
-			fmt.Printf("ERROR: Cannot get handle for namespace [%v]", err)
-			goto cleanexit
-		}
-
-		l, err = ch.LinkByName(dummyName)
-		if err != nil{
-			fmt.Printf("ERROR: Error getting dummy device %s [%v] ", dummyName, err)
-			goto cleanexit
-		}
-		if l == nil {
-			fmt.Printf("ERROR: Cannot find dummy device %s [%v] ", dummyName, err)
-			goto cleanexit
-		}
-
-		err = ch.LinkDel(l)
-		if err != nil {
-			fmt.Printf("ERROR: Cannot delete dummy device %s [%v]", dummyName, err)
-			// Fall through
-		}
-
-		cleanexit:
-		_ = db.Close()
-		os.Exit(1)
-	}()
 
 	switchLoDev := &netlink.Device{}
 	switchLoDev.LinkAttrs.Name = "lo"
