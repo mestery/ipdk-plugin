@@ -817,9 +817,25 @@ func main() {
 	godotenv.Load("~/.ipdk/ipdk.env")
 
 	// Create namespace
-	if nsID, err = netns.NewNamed(switchNS); err != nil {
-		glog.Fatalf("error creating %s namespace", switchNS)
+	if nsID, err = netns.GetFromName(switchNS); err != nil {
+		if nsID, err = netns.NewNamed(switchNS); err != nil {
+			glog.Fatalf("error creating %s namespace", switchNS)
+		}
+		defer netns.DeleteNamed(switchNS)
+	} else {
+		glog.Infof("switch namespace already exists")
 	}
+
+	// Create dummy recirculation device
+	dummyDev := &netlink.Dummy{}
+	dummyDev.LinkAttrs.Name = dummyName
+	if err = netlink.LinkAdd(dummyDev); err != nil {
+		glog.Fatalf("error creating dummy device %s: [%v]", dummyName, err)
+        }
+	if err = netlink.LinkSetNsFd(dummyDev, int(nsID)); err != nil {
+		glog.Fatalf("error setting link into namespace %s: [%v]", dummyName, err)
+	}
+	defer netlink.LinkDel(dummyDev)
 
 	// Delete namespace on ctrl-c
 	c := make(chan os.Signal)
@@ -833,17 +849,7 @@ func main() {
 		_ = db.Close()
 		os.Exit(1)
 	}()
-	defer netns.DeleteNamed(switchNS)
 
-	// Create dummy recirculation device
-	dummyDev := &netlink.Dummy{}
-	dummyDev.LinkAttrs.Name = dummyName
-	if err = netlink.LinkAdd(dummyDev); err != nil {
-		glog.Fatalf("error creating dummy device %s: [%v]", dummyName, err)
-        }
-	if err = netlink.LinkSetNsFd(dummyDev, int(nsID)); err != nil {
-		glog.Fatalf("error setting link into namespace %s: [%v]", dummyName, err)
-	}
 	switchLoDev := &netlink.Device{}
 	switchLoDev.LinkAttrs.Name = "lo"
 	if err = netlink.LinkSetUp(switchLoDev); err != nil {
