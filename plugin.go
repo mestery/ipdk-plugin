@@ -49,6 +49,7 @@ type epVal struct {
 	vethServerIf   int
 	vethClientMac  net.HardwareAddr
 	vethServerMac  net.HardwareAddr
+	clientP4Port   int
 }
 
 type nwVal struct {
@@ -340,25 +341,71 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
         }
 	vethServerMac := l.Attrs().HardwareAddr
 	vethServerIf := l.Attrs().Index
-	if err = netlink.LinkSetUp(l); err != nil {
+	if err = netlink.LinkSetNsFd(l, int(nsID)); err != nil {
+		glog.Infof("ERROR: Cannot set veth server interface up [%v]", err)
+		resp.Err = fmt.Sprintf("Cannot set veth server interface up : [%v]", err)
+		sendResponse(resp, w)
+		return
+	}
+
+	// Set the link up in the namespace
+	var ch *netlink.Handle
+
+	nh, nerr := netns.GetFromName(switchNS)
+	if nerr != nil {
+		glog.Infof("ERROR: Cannot get handle to %s namespace [%v]", switchNS, err)
+		resp.Err = fmt.Sprintf("Cannot get handle to %s namespace : [%v]", switchNS, err)
+		sendResponse(resp, w)
+		return
+	}
+	ch, err = netlink.NewHandleAt(nh)
+	if err != nil {
+		glog.Infof("ERROR: Cannot get handle for namespace [%v]", err)
+		resp.Err = fmt.Sprintf("Cannot get handle for s namespace : [%v]", err)
+		sendResponse(resp, w)
+		return
+	}
+	l, err = ch.LinkByName(vethServer)
+	if err != nil{
+		glog.Infof("ERROR: Error getting dummy device %s [%v]", vethServer, err)
+		resp.Err = fmt.Sprintf(":Error getting dummy device %s [%v]", vethServer, err)
+		sendResponse(resp, w)
+		return
+	}
+	if l == nil {
+		glog.Infof("ERROR: Cannot find dummy device %s [%v]", vethServer, err)
+		resp.Err = fmt.Sprintf("Cannot find dummy device %s [%v]", vethServer, err)
+		sendResponse(resp, w)
+		return
+	}
+
+	if err = ch.LinkSetUp(l); err != nil {
 		glog.Infof("ERROR: Cannot set veth server interface up [%v] ", err)
 		resp.Err = fmt.Sprintf("Cannot set veth server interface up : [%v]", err)
 		sendResponse(resp, w)
 		return
 	}
 
-	if err = netlink.LinkSetNsFd(l, int(nsID)); err != nil {
-		glog.Fatalf("error setting vethServer into namespace %s: [%v]", vethServer, err)
+	p4_intf := brMap.intfCount
+	brMap.intfCount = brMap.intfCount + 1
+
+	ipdkIp, _, err := net.ParseCIDR(req.Interface.Address)
+	if err != nil {
+		glog.Infof("ERROR: Failed parsing IP [%v] ", err)
+		resp.Err = fmt.Sprintf("Failed parsing IP : [%v]", err)
+		sendResponse(resp, w)
+		return
 	}
 
 	epMap.m[req.EndpointID] = &epVal{
-		IP:            req.Interface.Address,
+		IP:            ipdkIp.String(),
 		vethServerName: vethServer,
 		vethClientName: vethClient,
 		vethClientMac: vethClientMac,
 		vethServerMac: vethServerMac,
 		vethClientIf: vethClientIf,
 		vethServerIf: vethServerIf,
+		clientP4Port: p4_intf,
 	}
 
 	if err := dbAdd("epMap", req.EndpointID, epMap.m[req.EndpointID]); err != nil {
@@ -441,11 +488,6 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Here we want to do the following:
-	// 1. psabpf-ctl action-selector add_member pipe "$PIPELINE" DemoIngress_as id 1 data "$SWITCH_SERVER1_PORT_ID" "$SWITCH_SERVER1_PORT_MAC" "$SERVER1_MAC"
-	// 2. psabpf-ctl table add pipe "$PIPELINE" DemoIngress_tbl_routing ref key "$SERVER1_IP/32" data 1
-	// 3. psabpf-ctl table add pipe "$PIPELINE" DemoIngress_tbl_arp_ipv4 id 2 key "$SWITCH_SERVER1_PORT_ID" 1 "$SERVER1_IP/$SERVER1_IP_PREFIX" data "$SWITCH_SERVER1_PORT_MAC"
-
 	//Generate IPDK vhost-user interface:
 	//docker exec -it ipdk gnmi-cli set "device:virtual-device,name:net_vhost0,host:host1,device-type:VIRTIO_NET,queues:1,socket-path:/tmp/vhost-user-0,port-type:LINK"
 	//cmd := "docker"
@@ -480,6 +522,40 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 	nwMap.Unlock()
 	epMap.Unlock()
 
+	// Here we want to do the following:
+	// 0. psabpf-ctl add-port pipe 1 dev eth0
+	// 1. psabpf-ctl action-selector add_member pipe "$PIPELINE" DemoIngress_as id 1 data "$SWITCH_SERVER1_PORT_ID" "$SWITCH_SERVER1_PORT_MAC" "$SERVER1_MAC"
+	// 2. psabpf-ctl table add pipe "$PIPELINE" DemoIngress_tbl_routing ref key "$SERVER1_IP/32" data 1
+	// 3. psabpf-ctl table add pipe "$PIPELINE" DemoIngress_tbl_arp_ipv4 id 2 key "$SWITCH_SERVER1_PORT_ID" 1 "$SERVER1_IP/$SERVER1_IP_PREFIX" data "$SWITCH_SERVER1_PORT_MAC"
+	cmd := "docker"
+	args := []string{"exec", "ipdk", "psabpf-ctl", "add-port", "pipe", "1", "dev", fmt.Sprintf("%s", em.vethServerName)}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd, args, err)
+		sendResponse(resp, w)
+		return
+	}
+
+	cmd2 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", "1", "ingress_ipv4_host", "id", "1", "key",
+		fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", em.clientP4Port))
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd2.Stdout = &out
+	cmd2.Stderr = &stderr
+
+	args = []string{"exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", "1", "ingress_ipv4_host", "id", "1", "key",
+		fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", em.clientP4Port)}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	//if err := exec.Command(cmd, args...).Run(); err != nil {
+	if err = cmd2.Run(); err != nil {
+		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd, args, err)
+		sendResponse(resp, w)
+		return
+	}
+
 	resp.Gateway = nm.Gateway.IP.String()
 	resp.InterfaceName = &api.InterfaceName{
 		SrcName:   em.vethClientName,
@@ -502,6 +578,30 @@ func handlerLeave(w http.ResponseWriter, r *http.Request) {
 	req := api.LeaveRequest{}
 	if err := json.Unmarshal(body, &req); err != nil {
 		resp.Err = "Error: " + err.Error()
+		sendResponse(resp, w)
+		return
+	}
+
+	epMap.Lock()
+	em := epMap.m[req.EndpointID]
+	epMap.Unlock()
+
+	cmd := "docker"
+	args := []string{"exec", "ipdk", "psabpf-ctl", "table", "delete", "pipe", "1", "ingress_ipv4_host", "key",
+		fmt.Sprintf("%s/32 data %d", em.IP, em.clientP4Port)}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd, args, err)
+		sendResponse(resp, w)
+		return
+	}
+
+	args = []string{"exec", "ipdk", "psabpf-ctl", "del-port", "pipe", "1", "dev", fmt.Sprintf("%s", em.vethServerName)}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd, args, err)
 		sendResponse(resp, w)
 		return
 	}
