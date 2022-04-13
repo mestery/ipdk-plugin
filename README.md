@@ -1,3 +1,5 @@
+[![ipdk-plugin CI](https://github.com/mestery/ipdk-plugin/actions/workflows/build.yml/badge.svg)](https://github.com/mestery/ipdk-plugin/actions/workflows/build.yml)
+
 # ipdk ebpf docker network plugin
 
 This is a simple Docker CNM which integrates with the [IPDK](https://ipdk.io)
