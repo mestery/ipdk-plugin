@@ -1,0 +1,36 @@
+name: ipdk-plugin CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  # if workflow for PR or push is already running stop it, and start new one
+  group: makefile-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+
+    # Setup go
+    - name: Setup Go
+      uses: actions/setup-go@v3
+      with:
+        go-version: "1.18.0"
+        check-latest: true
+
+    # Install all the dependencies
+    - name: Install dependencies
+      run: |
+        go version
+        go get -u golang.org/x/lint/golint
+
+    # Run build of the application
+    - name: Run build
+      run: go build .
+
