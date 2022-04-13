@@ -17,7 +17,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/gob"
 	"encoding/json"
@@ -55,6 +54,7 @@ type epVal struct {
 type nwVal struct {
 	Bridge  string //The bridge on which the ports will be created
 	Gateway net.IPNet
+	Pipeline int
 }
 
 var intfCounter int
@@ -66,6 +66,7 @@ var epMap struct {
 
 var nwMap struct {
 	sync.Mutex
+	Pipeline int // The P4 pipeline used
 	m map[string]*nwVal
 }
 
@@ -88,6 +89,7 @@ func init() {
 	brMap.m = make(map[string]int)
 	brMap.brCount = 1
 	brMap.intfCount = 1
+	nwMap.Pipeline = 1
 	dbFile = "/tmp/dpdk_bolt.db"
 }
 
@@ -151,11 +153,16 @@ func handlerCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	nwMap.Lock()
 	defer nwMap.Unlock()
 
+	// Save pipeline ID
+	pipeline := nwMap.Pipeline
+	nwMap.Pipeline = nwMap.Pipeline + 1
+
 	//Record the docker network UUID to SDN bridge mapping
 	//This has to survive a plugin crash/restart and needs to be persisted
 	nwMap.m[req.NetworkID] = &nwVal{
 		Bridge:  bridge,
 		Gateway: *req.IPv4Data[0].Gateway,
+		Pipeline: pipeline,
 	}
 
 	if err := dbAdd("nwMap", req.NetworkID, nwMap.m[req.NetworkID]); err != nil {
@@ -528,7 +535,7 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 	// 2. psabpf-ctl table add pipe "$PIPELINE" DemoIngress_tbl_routing ref key "$SERVER1_IP/32" data 1
 	// 3. psabpf-ctl table add pipe "$PIPELINE" DemoIngress_tbl_arp_ipv4 id 2 key "$SWITCH_SERVER1_PORT_ID" 1 "$SERVER1_IP/$SERVER1_IP_PREFIX" data "$SWITCH_SERVER1_PORT_MAC"
 	cmd := "docker"
-	args := []string{"exec", "ipdk", "psabpf-ctl", "add-port", "pipe", "1", "dev", fmt.Sprintf("%s", em.vethServerName)}
+	args := []string{"exec", "ipdk", "psabpf-ctl", "add-port", "pipe", fmt.Sprintf("%d", nm.Pipeline), "dev", fmt.Sprintf("%s", em.vethServerName)}
 	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
 	if err := exec.Command(cmd, args...).Run(); err != nil {
 		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
@@ -537,14 +544,14 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd2 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", "1", "ingress_ipv4_host", "id", "1", "key",
+	cmd2 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "ingress_ipv4_host", "id", "1", "key",
 		fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", em.clientP4Port))
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd2.Stdout = &out
 	cmd2.Stderr = &stderr
 
-	args = []string{"exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", "1", "ingress_ipv4_host", "id", "1", "key",
+	args = []string{"exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "ingress_ipv4_host", "id", "1", "key",
 		fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", em.clientP4Port)}
 	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
 	//if err := exec.Command(cmd, args...).Run(); err != nil {
@@ -582,12 +589,15 @@ func handlerLeave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	nwMap.Lock()
 	epMap.Lock()
+	nm := nwMap.m[req.NetworkID]
 	em := epMap.m[req.EndpointID]
+	nwMap.Unlock()
 	epMap.Unlock()
 
 	cmd := "docker"
-	args := []string{"exec", "ipdk", "psabpf-ctl", "table", "delete", "pipe", "1", "ingress_ipv4_host", "key",
+	args := []string{"exec", "ipdk", "psabpf-ctl", "table", "delete", "pipe", fmt.Sprintf("%d", nm.Pipeline), "ingress_ipv4_host", "key",
 		fmt.Sprintf("%s/32 data %d", em.IP, em.clientP4Port)}
 	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
 	if err := exec.Command(cmd, args...).Run(); err != nil {
@@ -597,7 +607,7 @@ func handlerLeave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args = []string{"exec", "ipdk", "psabpf-ctl", "del-port", "pipe", "1", "dev", fmt.Sprintf("%s", em.vethServerName)}
+	args = []string{"exec", "ipdk", "psabpf-ctl", "del-port", "pipe", fmt.Sprintf("%d", nm.Pipeline), "dev", fmt.Sprintf("%s", em.vethServerName)}
 	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
 	if err := exec.Command(cmd, args...).Run(); err != nil {
 		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
@@ -949,49 +959,6 @@ func initDb() error {
 	})
 
 	return err
-}
-
-func programP4() error {
-	cmd := "docker"
-	args := []string{"exec", "ipdk", "p4c", "--arch", "psa", "--target", "dpdk", "--output", "/root/examples/simple_l3/pipe", "--p4runtime-files", "/root/examples/simple_l3/p4Info.txt", "--bf-rt-schema", "/root/examples/simple_l3/bf-rt.json", "--context", "/root/examples/simple_l3/pipe/context.json", "/root/examples/simple_l3/simple_l3.p4"}
-	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
-	output, err := exec.Command(cmd, args...).Output()
-	if err != nil {
-		return fmt.Errorf("p4c building error [%v]", err)
-	}
-
-	ifcb, _, err := bufio.NewReader(bytes.NewReader(output)).ReadLine()
-	ifc := string(ifcb)
-
-	glog.Infof("INFO: Result of building p4c program [%v]", ifc)
-
-	cmd = "docker"
-	args = []string{"exec", "ipdk", "bash", "-c", "cd /root/examples/simple_l3 && ovs_pipeline_builder --p4c_conf_file=/root/examples/simple_l3/simple_l3.conf --bf_pipeline_config_binary_file=simple_l3.pb.bin"}
-	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
-	output, err = exec.Command(cmd, args...).Output()
-	if err != nil {
-		return fmt.Errorf("P4 programming error [%v]", err)
-	}
-
-	ifcb, _, err = bufio.NewReader(bytes.NewReader(output)).ReadLine()
-	ifc = string(ifcb)
-
-	glog.Infof("INFO: Result of P4 pipeline programming [%v]", ifc)
-
-	cmd = "docker"
-	args = []string{"exec", "ipdk", "bash", "-c", "cd /root/examples/simple_l3 && ovs-p4ctl set-pipe br0 /root/examples/simple_l3/simple_l3.pb.bin /root/examples/simple_l3/p4Info.txt"}
-	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
-	output, err = exec.Command(cmd, args...).Output()
-	if err != nil {
-		return fmt.Errorf("ovs-p4ctl error [%v]", err)
-	}
-
-	ifcb, _, err = bufio.NewReader(bytes.NewReader(output)).ReadLine()
-	ifc = string(ifcb)
-
-	glog.Infof("INFO: Result of ovs-p4ctl [%v]", ifc)
-
-	return nil
 }
 
 func main() {
