@@ -74,6 +74,7 @@ var brMap struct {
 	sync.Mutex
 	brCount int
 	intfCount int
+	actionCount int
 	m       map[string]int
 }
 
@@ -89,6 +90,7 @@ func init() {
 	brMap.m = make(map[string]int)
 	brMap.brCount = 1
 	brMap.intfCount = 1
+	brMap.actionCount = 1
 	nwMap.Pipeline = 1
 	dbFile = "/tmp/dpdk_bolt.db"
 }
@@ -324,7 +326,9 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		sendResponse(resp, w)
 		return
         }
-	vethClientMac := l.Attrs().HardwareAddr
+	vethClientMacString := req.Interface.MacAddress
+	vethClientMac, _ := net.ParseMAC(vethClientMacString)
+	glog.Infof("INFO: vethClientMac is %s", vethClientMac.String())
 	vethClientIf := l.Attrs().Index
 	if err = netlink.LinkSetUp(l); err != nil {
 		glog.Infof("ERROR: Cannot set veth client interface up [%v] ", err)
@@ -522,6 +526,9 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	brMap.Lock()
+	defer brMap.Unlock()
+
 	nwMap.Lock()
 	epMap.Lock()
 	nm := nwMap.m[req.NetworkID]
@@ -544,24 +551,51 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd2 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "ingress_ipv4_host", "id", "1", "key",
-		fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", em.clientP4Port))
 	var out bytes.Buffer
 	var stderr bytes.Buffer
+	cmd2 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "action-selector", "add_member", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_as", "id", "1", "data",
+		fmt.Sprintf("%d", em.vethServerIf), fmt.Sprintf("%s", em.vethServerMac.String()), fmt.Sprintf("%s", em.vethClientMac.String()))
 	cmd2.Stdout = &out
 	cmd2.Stderr = &stderr
-
-	args = []string{"exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "ingress_ipv4_host", "id", "1", "key",
-		fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", em.clientP4Port)}
-	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
-	//if err := exec.Command(cmd, args...).Run(); err != nil {
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd2, args)
 	if err = cmd2.Run(); err != nil {
 		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
-		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
-		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd, args, err)
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd2, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd2, args, err)
 		sendResponse(resp, w)
 		return
 	}
+
+	//cmd3 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_routing", "id", "1", "key",
+	//	fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", em.clientP4Port))
+	cmd3 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_routing", "ref", "key",
+		fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", brMap.actionCount))
+	cmd3.Stdout = &out
+	cmd3.Stderr = &stderr
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd3, args)
+	if err = cmd3.Run(); err != nil {
+		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd3, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd3, args, err)
+		sendResponse(resp, w)
+		return
+	}
+
+	cmd4 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_arp_ipv4", "id", "2", "key",
+		fmt.Sprintf("%d", em.vethServerIf), "1", fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%s", em.vethServerMac.String()))
+	cmd4.Stdout = &out
+	cmd3.Stderr = &stderr
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd4, args)
+	if err = cmd4.Run(); err != nil {
+		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd4, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd4, args, err)
+		sendResponse(resp, w)
+		return
+	}
+
+	// Bump actionCount
+	brMap.actionCount = brMap.actionCount + 1
 
 	resp.Gateway = nm.Gateway.IP.String()
 	resp.InterfaceName = &api.InterfaceName{
