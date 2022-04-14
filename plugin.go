@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,7 @@ import (
 
 type epVal struct {
 	IP             string
+	mask           string
 	vethClientName string
 	vethServerName string
 	vethClientIf   int
@@ -400,16 +402,11 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 	p4_intf := brMap.intfCount
 	brMap.intfCount = brMap.intfCount + 1
 
-	ipdkIp, _, err := net.ParseCIDR(req.Interface.Address)
-	if err != nil {
-		glog.Infof("ERROR: Failed parsing IP [%v] ", err)
-		resp.Err = fmt.Sprintf("Failed parsing IP : [%v]", err)
-		sendResponse(resp, w)
-		return
-	}
+	ipString := strings.Split(req.Interface.Address, "/")
 
 	epMap.m[req.EndpointID] = &epVal{
-		IP:            ipdkIp.String(),
+		IP:            ipString[0],
+		mask:          ipString[1],
 		vethServerName: vethServer,
 		vethClientName: vethClient,
 		vethClientMac: vethClientMac,
@@ -566,10 +563,30 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bump actionCount
+	routingAction := brMap.actionCount
+	brMap.actionCount = brMap.actionCount + 1
+
+	cmd5 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "action-selector", "add_member", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_as", "id", "2", "data",
+		fmt.Sprintf("%d", em.vethServerIf), fmt.Sprintf("%s", em.vethServerMac.String()), fmt.Sprintf("%s", em.vethClientMac.String()), fmt.Sprintf("%s", em.IP))
+	cmd5.Stdout = &out
+	cmd5.Stderr = &stderr
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd5, args)
+	if err = cmd5.Run(); err != nil {
+		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd5, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd5, args, err)
+		sendResponse(resp, w)
+		return
+	}
+
+	// Bump actionCount
+	brMap.actionCount = brMap.actionCount + 1
+
 	//cmd3 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_routing", "id", "1", "key",
 	//	fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", em.clientP4Port))
 	cmd3 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_routing", "ref", "key",
-		fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", brMap.actionCount))
+		fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", routingAction))
 	cmd3.Stdout = &out
 	cmd3.Stderr = &stderr
 	glog.Infof("INFO: Running command [%v] with args [%v]", cmd3, args)
@@ -582,9 +599,9 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd4 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_arp_ipv4", "id", "2", "key",
-		fmt.Sprintf("%d", em.vethServerIf), "1", fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%s", em.vethServerMac.String()))
+		fmt.Sprintf("%d", em.vethServerIf), "1", fmt.Sprintf("%s/%s", em.IP, em.mask), "data", fmt.Sprintf("%s", em.vethServerMac.String()))
 	cmd4.Stdout = &out
-	cmd3.Stderr = &stderr
+	cmd4.Stderr = &stderr
 	glog.Infof("INFO: Running command [%v] with args [%v]", cmd4, args)
 	if err = cmd4.Run(); err != nil {
 		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
