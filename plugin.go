@@ -34,6 +34,7 @@ import (
 	"github.com/boltdb/bolt"
 	"github.com/moby/libnetwork/drivers/remote/api"
 	ipamapi "github.com/docker/libnetwork/ipams/remote/api"
+	goipam "github.com/metal-stack/go-ipam"
 	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
@@ -59,6 +60,11 @@ type nwVal struct {
 	Pipeline int
 }
 
+type ipamVal struct {
+	subnet        string
+	gateway       string
+}
+
 var intfCounter int
 
 var epMap struct {
@@ -80,9 +86,17 @@ var brMap struct {
 	m       map[string]int
 }
 
+var ipamMap struct {
+	sync.Mutex
+	count int
+	m     map[string]*ipamVal
+}
+
 var dbFile string
 var db *bolt.DB
 var nsID netns.NsHandle
+var ipdkMutex sync.Mutex
+var ipdkIpam goipam.Ipamer
 
 const switchNS = "switch"
 
@@ -90,10 +104,12 @@ func init() {
 	epMap.m = make(map[string]*epVal)
 	nwMap.m = make(map[string]*nwVal)
 	brMap.m = make(map[string]int)
+	ipamMap.m = make(map[string]*ipamVal)
 	brMap.brCount = 1
 	brMap.intfCount = 1
 	brMap.actionCount = 1
 	nwMap.Pipeline = 1
+	ipamMap.count = 0
 	dbFile = "/tmp/dpdk_bolt.db"
 }
 
@@ -183,6 +199,17 @@ func handlerCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	brMap.Unlock()
 
+	// .FIXME: Need to stop hard coding demo.o below
+	cmd := "docker"
+	args := []string{"exec", "ipdk", "psabpf-ctl", "pipeline", "load", "id", fmt.Sprintf("%d", pipeline), "/root/ipdk-ebpf/demo.o"}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd, args, err)
+		sendResponse(resp, w)
+		return
+	}
+
 	sendResponse(resp, w)
 }
 
@@ -209,6 +236,7 @@ func handlerDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 	defer nwMap.Unlock()
 
 	bridge := nwMap.m[req.NetworkID].Bridge
+	pipeline := nwMap.m[req.NetworkID].Pipeline
 	delete(nwMap.m, req.NetworkID)
 	if err := dbDelete("nwMap", req.NetworkID); err != nil {
 		glog.Errorf("Unable to update db %v %v", err, bridge)
@@ -220,6 +248,16 @@ func handlerDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 		glog.Errorf("Unable to update db %v %v", err, bridge)
 	}
 	brMap.Unlock()
+
+	cmd := "docker"
+	args := []string{"exec", "ipdk", "psabpf-ctl", "pipeline", "unload", "id", fmt.Sprintf("%d", pipeline)}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd, args, err)
+		sendResponse(resp, w)
+		return
+	}
 
 	sendResponse(resp, w)
 	return
@@ -270,19 +308,19 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip, _, err := net.ParseCIDR(req.Interface.Address)
-	if err != nil {
-		resp.Err = "Error: Invalid IP Address " + err.Error()
-		sendResponse(resp, w)
-		return
-	}
-
 	nwMap.Lock()
 	bridge := nwMap.m[req.NetworkID].Bridge
 	nwMap.Unlock()
 
 	if bridge == "" {
 		resp.Err = "Error: incompatible network"
+		sendResponse(resp, w)
+		return
+	}
+
+	ip, _, err := net.ParseCIDR(req.Interface.Address)
+	if err != nil {
+		resp.Err = "Error: Invalid IP Address " + err.Error()
 		sendResponse(resp, w)
 		return
 	}
@@ -328,8 +366,14 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		sendResponse(resp, w)
 		return
         }
-	vethClientMacString := req.Interface.MacAddress
-	vethClientMac, _ := net.ParseMAC(vethClientMacString)
+	var vethClientMac net.HardwareAddr
+
+	if req.Interface.MacAddress != ""  {
+		vethClientMacString := req.Interface.MacAddress
+		vethClientMac, _ = net.ParseMAC(vethClientMacString)
+	} else {
+		vethClientMac = l.Attrs().HardwareAddr
+	}
 	glog.Infof("INFO: vethClientMac is %s", vethClientMac.String())
 	vethClientIf := l.Attrs().Index
 	if err = netlink.LinkSetUp(l); err != nil {
@@ -759,9 +803,28 @@ func ipamRequestPool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ipdkMutex.Lock()
+	_, ipamerr := ipdkIpam.NewPrefix(req.Pool)
+	ipdkMutex.Unlock()
+	if ipamerr != nil {
+		resp.Error = "Error: " + ipamerr.Error()
+		sendResponse(resp, w)
+		return
+	}
+
 	resp.PoolID = uuid.Generate().String()
 	resp.Pool = req.Pool
+
+	ipamMap.Lock()
+	ipamMap.count = ipamMap.count + 1
+	ipamMap.m[resp.PoolID] = &ipamVal{
+		subnet:  req.Pool,
+	}
+	ipamMap.Unlock()
+
 	sendResponse(resp, w)
+
+	glog.Infof("INFO: Saved poolID [%s] with subnet [%s]", resp.PoolID, req.Pool)
 }
 
 func ipamReleasePool(w http.ResponseWriter, r *http.Request) {
@@ -777,6 +840,34 @@ func ipamReleasePool(w http.ResponseWriter, r *http.Request) {
 	req := ipamapi.ReleasePoolRequest{}
 	if err := json.Unmarshal(body, &req); err != nil {
 		resp.Error = "Error: " + err.Error()
+		sendResponse(resp, w)
+		return
+	}
+
+	ipamMap.Lock()
+	defer ipamMap.Unlock()
+
+	ipm := ipamMap.m[req.PoolID]
+	ipamSubnet := ipm.subnet
+	ipamMap.count = ipamMap.count - 1
+
+	ipdkMutex.Lock()
+	defer ipdkMutex.Unlock()
+
+	if ipm.gateway != "" {
+		ipamerr := ipdkIpam.ReleaseIPFromPrefix(ipamSubnet, ipm.gateway)
+		if ipamerr != nil {
+			resp.Error = "Error: " + ipamerr.Error()
+			sendResponse(resp, w)
+			return
+		}
+	}
+
+	delete(ipamMap.m, req.PoolID)
+
+	_, ipamerr := ipdkIpam.DeletePrefix(ipamSubnet)
+	if ipamerr != nil {
+		resp.Error = "Error: " + ipamerr.Error()
 		sendResponse(resp, w)
 		return
 	}
@@ -801,11 +892,46 @@ func ipamRequestAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ipamMap.Lock()
+	defer ipamMap.Unlock()
+	ipm := ipamMap.m[req.PoolID]
+	ipamSubnet := ipm.subnet
+
+	if val, ok := req.Options["RequestAddressType"]; ok {
+		if val == "com.docker.network.gateway" {
+			glog.Info("INFO: Saving gateway address [%s]", req.Address)
+			ipm.gateway = req.Address
+		}
+	}
+
+	glog.Info("INFO: Found subnet [%s] for ID [%s]", ipamSubnet, req.PoolID)
+
+	ipdkMutex.Lock()
+	defer ipdkMutex.Unlock()
+
 	//TODO: Should come from the subnet mask for the subnet
 	if req.Address != "" {
-		resp.Address = req.Address + "/24"
+		ip, ipamerr := ipdkIpam.AcquireSpecificIP(ipamSubnet, req.Address)
+		if ipamerr != nil {
+			glog.Error("ERROR: Specific IP %s not found in CIDR %s", req.Address, ipamSubnet)
+			resp.Error = "Error: " + ipamerr.Error()
+			sendResponse(resp, w)
+			return
+		}
+
+		resp.Address = ip.IP.String() + "/24"
+		glog.Info("INFO: Selected IP %v %v", ip.IP.String, resp.Address)
 	} else {
-		resp.Error = "Error: Request does not have IP address. Specify using --ip"
+		ip, ipamerr := ipdkIpam.AcquireIP(ipamSubnet)
+		if ipamerr != nil {
+			glog.Error("ERROR: Unable to acquire IP from subnet %s", ipamSubnet)
+			resp.Error = "Error: " + ipamerr.Error()
+			sendResponse(resp, w)
+			return
+		}
+
+		resp.Address = ip.IP.String() + "/24"
+		glog.Info("INFO: Selected IP %v %v", ip.IP.String, resp.Address)
 	}
 	sendResponse(resp, w)
 }
@@ -823,6 +949,20 @@ func ipamReleaseAddress(w http.ResponseWriter, r *http.Request) {
 	req := ipamapi.ReleaseAddressRequest{}
 	if err := json.Unmarshal(body, &req); err != nil {
 		resp.Error = "Error: " + err.Error()
+		sendResponse(resp, w)
+		return
+	}
+
+	ipamMap.Lock()
+	defer ipamMap.Unlock()
+	ipm := ipamMap.m[req.PoolID]
+	ipamSubnet := ipm.subnet
+
+	ipdkMutex.Lock()
+	ipamerr := ipdkIpam.ReleaseIPFromPrefix(ipamSubnet, req.Address)
+	ipdkMutex.Unlock()
+	if ipamerr != nil {
+		resp.Error = "Error: " + ipamerr.Error()
 		sendResponse(resp, w)
 		return
 	}
@@ -1037,6 +1177,11 @@ func main() {
 		err := db.Close()
 		glog.Errorf("unable to close database [%v]", err)
 	}()
+
+	// create a ipamer with in memory storage
+	// .FIXME: We're using memory backed storage, should probably use something on disk
+	// More details here: https://github.com/metal-stack/go-ipam
+	ipdkIpam = goipam.New()
 
 	r := mux.NewRouter()
 	r.HandleFunc("/Plugin.Activate", handlerPluginActivate)
