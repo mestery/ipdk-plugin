@@ -12,23 +12,11 @@ docker:
 #
 .PHONY: github-docker-merge
 github-docker-merge:
-	if [[ "${TAGS}" != "" ]] ; then \
-		IFS="," read -r -a TAG_LIST <<< "${TAGS}" \
-		for i in "${TAG_LIST[@]}" ; do \
-			ARGS+=("--tag" "${i}") \
-		done \
-	fi
-	docker build --push -t "${ARGS}" -f Dockerfile .
+	./scripts/build.sh merge
 
 #
 # Used when building pull requests in github actions CI
 #
 .PHONY: github-docker-pull-request
 github-docker-pull-request:
-	if [[ "${TAGS}" != "" ]] ; then \
-		IFS="," read -r -a TAG_LIST <<< "${TAGS}" \
-		for i in "${TAG_LIST[@]}" ; do \
-			ARGS+=("--tag" "${i}") \
-		done \
-	fi
-	docker build -t "${ARGS}" -o type=oci,dest="${TAR_EXPORT}" -f Dockerfile .
+	./scripts/build.sh pull-request
