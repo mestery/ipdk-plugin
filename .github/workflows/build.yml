@@ -53,12 +53,12 @@ jobs:
     - name: ipdk-plugin image build and export
       if: github.event_name == 'pull_request'
       run: |
-        TAGS=${{ steps.image_meta.outputs.tags }} TAR_EXPORT=/tmp/${{ steps.system.outputs.arch }}.tar make github-docker-pull-request
+        TAGS=${{ steps.image_meta.outputs.tags }} TAR_EXPORT=/tmp/ipdk-plugin.tar make github-docker-pull-request
 
     - name: Upload build artifact
       if: github.event_name == 'pull_request'
       uses: actions/upload-artifact@v2
       with:
         name: ${{ matrix.os }}-${{ steps.system.outputs.arch }}
-        path: /tmp/${{ steps.system.outputs.arch }}.tar
+        path: /tmp/ipdk-plugin.tar
         retention-days: 1
