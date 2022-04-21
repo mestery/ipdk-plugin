@@ -48,12 +48,12 @@ jobs:
     - name: ipdk-plugin image build and push
       if: github.event_name != 'pull_request'
       run: |
-        make github-docker-merge
+        TAGS=${{ steps.image_meta.outputs.tags }} make github-docker-merge
 
     - name: ipdk-plugin image build and export
       if: github.event_name == 'pull_request'
       run: |
-        TAR_EXPORT=/tmp/${{ steps.system.outputs.arch }}.tar make github-docker-pull-request
+        TAGS=${{ steps.image_meta.outputs.tags }} TAR_EXPORT=/tmp/${{ steps.system.outputs.arch }}.tar make github-docker-pull-request
 
     - name: Upload build artifact
       if: github.event_name == 'pull_request'
