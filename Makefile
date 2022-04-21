@@ -12,11 +12,11 @@ docker:
 #
 .PHONY: github-docker-merge
 github-docker-merge:
-	docker build --push -t ghcr.io/mestery/ipdk-plugin:"${TAGS}" -f Dockerfile .
+	docker build --push -t "${TAGS}" -f Dockerfile .
 
 #
 # Used when building pull requests in github actions CI
 #
 .PHONY: github-docker-pull-request
 github-docker-pull-request:
-	docker build -t ghcr.io/mestery/ipdk-plugin:"${TAGS}" -o type=oci,dest="${TAR_EXPORT}" -f Dockerfile .
+	docker build -t "${TAGS}" -o type=oci,dest="${TAR_EXPORT}" -f Dockerfile .
