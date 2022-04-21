@@ -12,7 +12,7 @@ docker:
 #
 .PHONY: github-docker-merge
 github-docker-merge:
-	if [[ "$TAGS" != "" ]] ; then
+	if [[ "${TAGS}" != "" ]] ; then
 		IFS="," read -r -a TAG_LIST <<< "${TAGS}"
 		for i in "${TAG_LIST[@]}" ; do
 			ARGS+=("--tag" "${i}")
@@ -25,7 +25,7 @@ github-docker-merge:
 #
 .PHONY: github-docker-pull-request
 github-docker-pull-request:
-	if [[ "$TAGS" != "" ]] ; then
+	if [[ "${TAGS}" != "" ]] ; then
 		IFS="," read -r -a TAG_LIST <<< "${TAGS}"
 		for i in "${TAG_LIST[@]}" ; do
 			ARGS+=("--tag" "${i}")
