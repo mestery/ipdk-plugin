@@ -5,6 +5,7 @@
 #
 # Version 0.1.0
 
+set -x
 
 if [ "${1}" == "merge" ] ; then
 	if [[ "${TAGS}" != "" ]] ; then

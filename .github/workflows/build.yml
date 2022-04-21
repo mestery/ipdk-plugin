@@ -59,6 +59,6 @@ jobs:
       if: github.event_name == 'pull_request'
       uses: actions/upload-artifact@v2
       with:
-        name: ${{ matrix.os }}-${{ steps.system.outputs.arch }}
+        name: ipdk-plugin
         path: /tmp/ipdk-plugin.tar
         retention-days: 1
