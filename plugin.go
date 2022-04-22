@@ -692,8 +692,8 @@ func handlerLeave(w http.ResponseWriter, r *http.Request) {
 	epMap.Unlock()
 
 	cmd := "docker"
-	args := []string{"exec", "ipdk", "psabpf-ctl", "table", "delete", "pipe", fmt.Sprintf("%d", nm.Pipeline), "ingress_ipv4_host", "key",
-		fmt.Sprintf("%s/32 data %d", em.IP, em.clientP4Port)}
+	args := []string{"exec", "ipdk", "psabpf-ctl", "table", "delete", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_arp_ipv4", "key",
+		fmt.Sprintf("%d", em.vethServerIf), "1", fmt.Sprintf("%s/%s", em.IP, em.mask)}
 	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
 	if err := exec.Command(cmd, args...).Run(); err != nil {
 		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
@@ -702,9 +702,18 @@ func handlerLeave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	args = []string{"exec", "ipdk", "psabpf-ctl", "table", "delete", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_routing", "key", fmt.Sprintf("%s/32", em.IP)}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	if err = exec.Command(cmd, args...).Run(); err != nil {
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd, args, err)
+		sendResponse(resp, w)
+		return
+	}
+
 	args = []string{"exec", "ipdk", "psabpf-ctl", "del-port", "pipe", fmt.Sprintf("%d", nm.Pipeline), "dev", fmt.Sprintf("%s", em.vethServerName)}
 	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
-	if err := exec.Command(cmd, args...).Run(); err != nil {
+	if err = exec.Command(cmd, args...).Run(); err != nil {
 		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
 		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd, args, err)
 		sendResponse(resp, w)
@@ -853,16 +862,6 @@ func ipamReleasePool(w http.ResponseWriter, r *http.Request) {
 
 	ipdkMutex.Lock()
 	defer ipdkMutex.Unlock()
-
-	if ipm.gateway != "" {
-		glog.Infof("INFO: Existing gateway IP found [%s], deleting", ipm.gateway)
-		ipamerr := ipdkIpam.ReleaseIPFromPrefix(ipamSubnet, ipm.gateway)
-		if ipamerr != nil {
-			resp.Error = "Error: " + ipamerr.Error()
-			sendResponse(resp, w)
-			return
-		}
-	}
 
 	delete(ipamMap.m, req.PoolID)
 
