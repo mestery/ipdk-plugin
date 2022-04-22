@@ -855,6 +855,7 @@ func ipamReleasePool(w http.ResponseWriter, r *http.Request) {
 	defer ipdkMutex.Unlock()
 
 	if ipm.gateway != "" {
+		glog.Infof("INFO: Existing gateway IP found [%s], deleting", ipm.gateway)
 		ipamerr := ipdkIpam.ReleaseIPFromPrefix(ipamSubnet, ipm.gateway)
 		if ipamerr != nil {
 			resp.Error = "Error: " + ipamerr.Error()
@@ -1203,6 +1204,7 @@ func main() {
 	r.HandleFunc("/IpamDriver.RequestPool", ipamRequestPool)
 	r.HandleFunc("/IpamDriver.ReleasePool", ipamReleasePool)
 	r.HandleFunc("/IpamDriver.RequestAddress", ipamRequestAddress)
+	r.HandleFunc("/IpamDriver.ReleaseAddress", ipamReleaseAddress)
 
 	r.HandleFunc("/", handler)
 	err = http.ListenAndServe("127.0.0.1:9075", r)
