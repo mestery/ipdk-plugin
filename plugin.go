@@ -58,6 +58,7 @@ type nwVal struct {
 	Bridge  string //The bridge on which the ports will be created
 	Gateway net.IPNet
 	Pipeline int
+	actionCount int
 }
 
 type ipamVal struct {
@@ -82,7 +83,6 @@ var brMap struct {
 	sync.Mutex
 	brCount int
 	intfCount int
-	actionCount int
 	m       map[string]int
 }
 
@@ -107,7 +107,6 @@ func init() {
 	ipamMap.m = make(map[string]*ipamVal)
 	brMap.brCount = 1
 	brMap.intfCount = 1
-	brMap.actionCount = 1
 	nwMap.Pipeline = 1
 	ipamMap.count = 0
 	dbFile = "/tmp/dpdk_bolt.db"
@@ -183,6 +182,7 @@ func handlerCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		Bridge:  bridge,
 		Gateway: *req.IPv4Data[0].Gateway,
 		Pipeline: pipeline,
+		actionCount: 1,
 	}
 
 	if err := dbAdd("nwMap", req.NetworkID, nwMap.m[req.NetworkID]); err != nil {
@@ -572,10 +572,10 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 
 	nwMap.Lock()
 	epMap.Lock()
+	defer nwMap.Unlock()
+	defer epMap.Unlock()
 	nm := nwMap.m[req.NetworkID]
 	em := epMap.m[req.EndpointID]
-	nwMap.Unlock()
-	epMap.Unlock()
 
 	// Here we want to do the following:
 	// 0. psabpf-ctl add-port pipe 1 dev eth0
@@ -608,24 +608,8 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bump actionCount
-	routingAction := brMap.actionCount
-	brMap.actionCount = brMap.actionCount + 1
-
-	cmd5 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "action-selector", "add_member", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_as", "id", "2", "data",
-		fmt.Sprintf("%d", em.vethServerIf), fmt.Sprintf("%s", em.vethServerMac.String()), fmt.Sprintf("%s", em.vethClientMac.String()), fmt.Sprintf("%s", em.IP))
-	cmd5.Stdout = &out
-	cmd5.Stderr = &stderr
-	glog.Infof("INFO: Running command [%v] with args [%v]", cmd5, args)
-	if err = cmd5.Run(); err != nil {
-		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
-		glog.Infof("ERROR: [%v] [%v] [%v]", cmd5, args, err)
-		resp.Err= fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]", cmd5, args, err)
-		sendResponse(resp, w)
-		return
-	}
-
-	// Bump actionCount
-	brMap.actionCount = brMap.actionCount + 1
+	routingAction := nm.actionCount
+	nm.actionCount = nm.actionCount + 1
 
 	//cmd3 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_routing", "id", "1", "key",
 	//	fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", em.clientP4Port))
@@ -654,9 +638,6 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 		sendResponse(resp, w)
 		return
 	}
-
-	// Bump actionCount
-	brMap.actionCount = brMap.actionCount + 1
 
 	resp.Gateway = nm.Gateway.IP.String()
 	resp.InterfaceName = &api.InterfaceName{
