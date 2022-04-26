@@ -6,6 +6,7 @@ This is a simple Docker CNI which integrates with the [IPDK](https://ipdk.io)
 project. Specifically, it works with the IPDK P4 eBPF backend.
 
 For more information about IPDK:
+
 * [IPDK Website](https://ipdk.io)
 * [IPDK GitHub](https://github.com/ipdk-io/ipdk)
 
@@ -14,20 +15,20 @@ namespace and the container's namespace.
 
 # How to use this plugin
 
-0. Build this plugin. 
+Build the plugin:
 
 ```
 $ go get
 $ go build
 ```
 
-1. Ensure that your plugin is discoverable https://docs.docker.com/engine/extend/plugin_api/#/plugin-discovery
+Ensure that your plugin is [discoverable](https://docs.docker.com/engine/extend/plugin_api/#/plugin-discovery)
 
 ```
 $ sudo cp ipdk.json /etc/docker/plugins/
 ```
 
-2. Start the plugin
+Start the plugin
 
 ```
 $ sudo ./ipdk-plugin&
