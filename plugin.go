@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017 Intel Corporation
+// Copyright (c) 2017,2022 Intel Corporation
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -51,7 +51,6 @@ type epVal struct {
 	vethServerIf   int
 	vethClientMac  net.HardwareAddr
 	vethServerMac  net.HardwareAddr
-	clientP4Port   int
 }
 
 type nwVal struct {
@@ -65,8 +64,6 @@ type ipamVal struct {
 	subnet        string
 	gateway       string
 }
-
-var intfCounter int
 
 var epMap struct {
 	sync.Mutex
@@ -82,7 +79,6 @@ var nwMap struct {
 var brMap struct {
 	sync.Mutex
 	brCount int
-	intfCount int
 	m       map[string]int
 }
 
@@ -106,7 +102,6 @@ func init() {
 	brMap.m = make(map[string]int)
 	ipamMap.m = make(map[string]*ipamVal)
 	brMap.brCount = 1
-	brMap.intfCount = 1
 	nwMap.Pipeline = 1
 	ipamMap.count = 0
 	dbFile = "/tmp/dpdk_bolt.db"
@@ -192,12 +187,12 @@ func handlerCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	// For IPDK, we are connecting endpoints via a bridge which requires
 	// a unique integer ID.
 	brMap.Lock()
+	defer brMap.Unlock()
 	brMap.m[req.NetworkID] = brMap.brCount
 	brMap.brCount = brMap.brCount + 1
 	if err := dbAdd("brMap", req.NetworkID, brMap.m[req.NetworkID]); err != nil {
 		glog.Errorf("Unable to update db %v", err)
 	}
-	brMap.Unlock()
 
 	// .FIXME: Need to stop hard coding demo.o below
 	cmd := "docker"
@@ -243,11 +238,11 @@ func handlerDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	brMap.Lock()
+	defer brMap.Unlock()
 	delete(brMap.m, req.NetworkID)
 	if err := dbDelete("brMap", req.NetworkID); err != nil {
 		glog.Errorf("Unable to update db %v %v", err, bridge)
 	}
-	brMap.Unlock()
 
 	cmd := "docker"
 	args := []string{"exec", "ipdk", "psabpf-ctl", "pipeline", "unload", "id", fmt.Sprintf("%d", pipeline)}
@@ -308,16 +303,6 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nwMap.Lock()
-	bridge := nwMap.m[req.NetworkID].Bridge
-	nwMap.Unlock()
-
-	if bridge == "" {
-		resp.Err = "Error: incompatible network"
-		sendResponse(resp, w)
-		return
-	}
-
 	ip, _, err := net.ParseCIDR(req.Interface.Address)
 	if err != nil {
 		resp.Err = "Error: Invalid IP Address " + err.Error()
@@ -325,14 +310,22 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	glog.Infof("About to lock nwMap")
 	nwMap.Lock()
 	defer nwMap.Unlock()
+	glog.Infof("Locked nwMap")
 
+	glog.Infof("About to lock epMap")
 	epMap.Lock()
 	defer epMap.Unlock()
+	glog.Infof("Locked epMap")
 
-	brMap.Lock()
-	defer brMap.Unlock()
+	bridge := nwMap.m[req.NetworkID].Bridge
+	if bridge == "" {
+		resp.Err = "Error: incompatible network"
+		sendResponse(resp, w)
+		return
+	}
 
 	// Create a unique name and host
 	vethServer := generateVethName()
@@ -443,9 +436,6 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p4_intf := brMap.intfCount
-	brMap.intfCount = brMap.intfCount + 1
-
 	ipString := strings.Split(req.Interface.Address, "/")
 
 	epMap.m[req.EndpointID] = &epVal{
@@ -457,7 +447,6 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		vethServerMac: vethServerMac,
 		vethClientIf: vethClientIf,
 		vethServerIf: vethServerIf,
-		clientP4Port: p4_intf,
 	}
 
 	if err := dbAdd("epMap", req.EndpointID, epMap.m[req.EndpointID]); err != nil {
@@ -486,6 +475,8 @@ func handlerDeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	epMap.Lock()
 	nwMap.Lock()
+	defer nwMap.Unlock()
+	defer epMap.Unlock()
 
 	m := epMap.m[req.EndpointID]
 
@@ -522,8 +513,6 @@ func handlerDeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 	if err := dbDelete("epMap", req.EndpointID); err != nil {
 		glog.Errorf("Unable to update db %v %v", err, m)
 	}
-	nwMap.Unlock()
-	epMap.Unlock()
 
 	// Need to delete port using openconfig when we can
 
@@ -571,8 +560,8 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 	defer brMap.Unlock()
 
 	nwMap.Lock()
-	epMap.Lock()
 	defer nwMap.Unlock()
+	epMap.Lock()
 	defer epMap.Unlock()
 	nm := nwMap.m[req.NetworkID]
 	em := epMap.m[req.EndpointID]
@@ -611,8 +600,6 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 	routingAction := nm.actionCount
 	nm.actionCount = nm.actionCount + 1
 
-	//cmd3 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_routing", "id", "1", "key",
-	//	fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", em.clientP4Port))
 	cmd3 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_routing", "ref", "key",
 		fmt.Sprintf("%s/32", em.IP), "data", fmt.Sprintf("%d", routingAction))
 	cmd3.Stdout = &out
@@ -666,11 +653,11 @@ func handlerLeave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nwMap.Lock()
+	defer nwMap.Unlock()
 	epMap.Lock()
+	defer epMap.Unlock()
 	nm := nwMap.m[req.NetworkID]
 	em := epMap.m[req.EndpointID]
-	nwMap.Unlock()
-	epMap.Unlock()
 
 	cmd := "docker"
 	args := []string{"exec", "ipdk", "psabpf-ctl", "table", "delete", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_arp_ipv4", "key",
@@ -794,8 +781,8 @@ func ipamRequestPool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ipdkMutex.Lock()
+	defer ipdkMutex.Unlock()
 	_, ipamerr := ipdkIpam.NewPrefix(req.Pool)
-	ipdkMutex.Unlock()
 	if ipamerr != nil {
 		resp.Error = "Error: " + ipamerr.Error()
 		sendResponse(resp, w)
@@ -806,11 +793,11 @@ func ipamRequestPool(w http.ResponseWriter, r *http.Request) {
 	resp.Pool = req.Pool
 
 	ipamMap.Lock()
+	defer ipamMap.Unlock()
 	ipamMap.count = ipamMap.count + 1
 	ipamMap.m[resp.PoolID] = &ipamVal{
 		subnet:  req.Pool,
 	}
-	ipamMap.Unlock()
 
 	sendResponse(resp, w)
 
@@ -940,8 +927,8 @@ func ipamReleaseAddress(w http.ResponseWriter, r *http.Request) {
 	ipamSubnet := ipm.subnet
 
 	ipdkMutex.Lock()
+	defer ipdkMutex.Unlock()
 	ipamerr := ipdkIpam.ReleaseIPFromPrefix(ipamSubnet, req.Address)
-	ipdkMutex.Unlock()
 	if ipamerr != nil {
 		resp.Error = "Error: " + ipamerr.Error()
 		sendResponse(resp, w)
@@ -1060,18 +1047,6 @@ func initDb() error {
 	tables := []string{"global", "nwMap", "epMap", "brMap"}
 	if err := dbTableInit(tables); err != nil {
 		return fmt.Errorf("dbInit failed %v", err)
-	}
-
-	c, err := dbGet("global", "counter")
-	if err != nil {
-		glog.Errorf("dbGet failed %v", err)
-		intfCounter = 100
-	} else {
-		var ok bool
-		intfCounter, ok = c.(int)
-		if !ok {
-			intfCounter = 100
-		}
 	}
 
 	err = db.View(func(tx *bolt.Tx) error {
