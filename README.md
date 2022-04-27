@@ -31,7 +31,14 @@ $ sudo cp ipdk.json /etc/docker/plugins/
 Start the plugin
 
 ```
-$ sudo ./ipdk-plugin&
+$ sudo ./ipdk-plugin &
+```
+
+To run the plugin such that it exposes a GW port into the host where docker is
+running, add `-hostports` to the command line:
+
+```
+$ sudo ./ipdk-plugin -hostports &
 ```
         
 Note: Enable password less sudo to ensure the plugin will run in the background without prompting.
