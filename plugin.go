@@ -58,6 +58,7 @@ type nwVal struct {
 	Gateway net.IPNet
 	Pipeline int
 	actionCount int
+	EndpointID string
 }
 
 type ipamVal struct {
@@ -93,6 +94,7 @@ var db *bolt.DB
 var nsID netns.NsHandle
 var ipdkMutex sync.Mutex
 var ipdkIpam goipam.Ipamer
+var hostPorts *bool
 
 const switchNS = "switch"
 
@@ -146,6 +148,231 @@ func handlerGetCapabilities(w http.ResponseWriter, r *http.Request) {
 	sendResponse(resp, w)
 }
 
+func createIpdkNetworkHostPort(gwString string, nm *nwVal) error {
+	glog.Infof("About to lock epMap")
+	epMap.Lock()
+	defer epMap.Unlock()
+	glog.Infof("Locked epMap")
+
+	ipString := strings.Split(gwString, "/")
+	ipAddr, err := netlink.ParseAddr(gwString)
+	if err != nil {
+		glog.Info("ERROR: Failed parsing IP address [%v]", err)
+		return err
+	}
+
+	// Create a unique name and host
+	vethServer := generateVethName()
+	vethClient := generateVethName()
+
+	veth := &netlink.Veth{}
+	veth.LinkAttrs.Name = vethClient
+	veth.PeerName = vethServer
+	veth.PeerNamespace = nsID
+
+	if err := netlink.LinkAdd(veth); err != nil {
+		glog.Infof("ERROR: Cannot add veth device [%v] ", err)
+		return err
+	}
+
+	glog.Infof("Adding veth pair (%s/%s) with nsID %d and MAC %s", vethServer, vethClient, veth.PeerNamespace, veth.PeerHardwareAddr)
+
+	l, err := netlink.LinkByName(vethServer)
+	if err != nil{
+		glog.Infof("ERROR: Error getting veth server [%v] ", err)
+		return err
+	}
+	if l == nil {
+		glog.Infof("ERROR: Cannot find veth server [%v] ", err)
+		return err
+	}
+	vethServerMac := l.Attrs().HardwareAddr
+	glog.Infof("INFO: vethServerMac is %s", vethServerMac.String())
+	vethServerIf := l.Attrs().Index
+	if err = netlink.LinkSetNsFd(l, int(nsID)); err != nil {
+		glog.Infof("ERROR: Cannot set veth server interface up [%v]", err)
+		return err
+	}
+
+	// Set the link up in the namespace
+	var ch *netlink.Handle
+
+	nh, nerr := netns.GetFromName(switchNS)
+	if nerr != nil {
+		glog.Infof("ERROR: Cannot get handle to %s namespace [%v]", switchNS, err)
+		return err
+	}
+	ch, err = netlink.NewHandleAt(nh)
+	if err != nil {
+		glog.Infof("ERROR: Cannot get handle for namespace [%v]", err)
+		return err
+	}
+	l, err = ch.LinkByName(vethServer)
+	if err != nil{
+		glog.Infof("ERROR: Error getting dummy device %s [%v]", vethServer, err)
+		return err
+	}
+	if l == nil {
+		glog.Infof("ERROR: Cannot find dummy device %s [%v]", vethServer, err)
+		return err
+	}
+
+	if err = ch.LinkSetUp(l); err != nil {
+		glog.Infof("ERROR: Cannot set veth server interface up [%v] ", err)
+		return err
+	}
+
+	l, err = netlink.LinkByName(vethClient)
+	if err != nil{
+		glog.Infof("ERROR: Error getting veth client [%v] ", err)
+		return err
+	}
+	if l == nil {
+		glog.Infof("ERROR: Cannot find veth client [%v] ", err)
+		return err
+	}
+
+	// Add the IP address to the interface
+	err = netlink.AddrAdd(l, ipAddr)
+	if (err != nil) {
+		glog.Infof("ERROR: Cannot add IP [%s] to interface: [%v]", ipString, err)
+		return err
+	}
+
+	vethClientMac := l.Attrs().HardwareAddr
+	glog.Infof("INFO: vethClientMac is %s", vethClientMac.String())
+	vethClientIf := l.Attrs().Index
+	if err = netlink.LinkSetUp(l); err != nil {
+		glog.Infof("ERROR: Cannot set veth client interface up [%v] ", err)
+		return err
+	}
+
+	epMap.m[nm.EndpointID] = &epVal{
+		IP:            ipString[0],
+		mask:          ipString[1],
+		vethServerName: vethServer,
+		vethClientName: vethClient,
+		vethClientMac: vethClientMac,
+		vethServerMac: vethServerMac,
+		vethClientIf: vethClientIf,
+		vethServerIf: vethServerIf,
+	}
+
+	if err := dbAdd("epMap", nm.EndpointID, epMap.m[nm.EndpointID]); err != nil {
+		glog.Errorf("Unable to update db %v %v", err, ipString[0])
+	}
+
+	// Plumb into ipdk container
+	cmd := "docker"
+	args := []string{"exec", "ipdk", "psabpf-ctl", "add-port", "pipe", fmt.Sprintf("%d", nm.Pipeline), "dev", fmt.Sprintf("%s", vethServer)}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+		return err
+	}
+
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd2 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "action-selector", "add_member", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_as", "id", "1", "data",
+		fmt.Sprintf("%d", vethServerIf), fmt.Sprintf("%s", vethServerMac.String()), fmt.Sprintf("%s", vethClientMac.String()))
+	cmd2.Stdout = &out
+	cmd2.Stderr = &stderr
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd2, args)
+	if err = cmd2.Run(); err != nil {
+		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd2, args, err)
+		return err
+	}
+
+	// Bump actionCount
+	routingAction := nm.actionCount
+	nm.actionCount = nm.actionCount + 1
+
+	cmd3 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_routing", "ref", "key",
+		fmt.Sprintf("%s/32", ipString[0]), "data", fmt.Sprintf("%d", routingAction))
+	cmd3.Stdout = &out
+	cmd3.Stderr = &stderr
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd3, args)
+	if err = cmd3.Run(); err != nil {
+		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd3, args, err)
+                return err
+	}
+
+	cmd4 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_arp_ipv4", "id", "2", "key",
+		fmt.Sprintf("%d", vethServerIf), "1", fmt.Sprintf("%s/%s", ipString[0], ipString[1]), "data", fmt.Sprintf("%s", vethServerMac.String()))
+	cmd4.Stdout = &out
+	cmd4.Stderr = &stderr
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd4, args)
+	if err = cmd4.Run(); err != nil {
+		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd4, args, err)
+                return err
+	}
+
+	return nil
+}
+
+func deleteIpdkNetworkHostPort(nm *nwVal) error {
+	glog.Infof("About to lock epMap")
+	epMap.Lock()
+	defer epMap.Unlock()
+	glog.Infof("Locked epMap")
+	em := epMap.m[nm.EndpointID]
+
+	// Delete the GW veth pair
+	cmd := "docker"
+	args := []string{"exec", "ipdk", "psabpf-ctl", "table", "delete", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_arp_ipv4", "key",
+		fmt.Sprintf("%d", em.vethServerIf), "1", fmt.Sprintf("%s/%s", em.IP, em.mask)}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+		return err
+	}
+
+	args = []string{"exec", "ipdk", "psabpf-ctl", "table", "delete", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_routing", "key", fmt.Sprintf("%s/32", em.IP)}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+                return err
+        }
+
+	args = []string{"exec", "ipdk", "psabpf-ctl", "del-port", "pipe", fmt.Sprintf("%d", nm.Pipeline), "dev", fmt.Sprintf("%s", em.vethServerName)}
+	glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		glog.Infof("ERROR: [%v] [%v] [%v]", cmd, args, err)
+		return err
+	}
+
+	// Now, cleanup the veth interfaces
+	l, err := netlink.LinkByName(em.vethClientName)
+	if err != nil{
+		glog.Infof("ERROR: Error getting veth server [%v] ", err)
+		return err
+	}
+	if l == nil {
+		glog.Infof("ERROR: Cannot find veth server [%v] ", err)
+		return err
+	}
+
+	err = netlink.LinkSetDown(l)
+	if err != nil {
+		return err
+	}
+
+	err = netlink.LinkDel(l)
+	if err != nil {
+		return err
+	}
+
+	delete(epMap.m, nm.EndpointID)
+	if err := dbDelete("epMap", nm.EndpointID); err != nil {
+		glog.Errorf("Unable to update db %v %v", err, em)
+	}
+
+	return nil
+}
+
 func handlerCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	resp := api.CreateNetworkResponse{}
 	bridge := "br"
@@ -171,6 +398,9 @@ func handlerCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	pipeline := nwMap.Pipeline
 	nwMap.Pipeline = nwMap.Pipeline + 1
 
+	// Create Endpoint ID
+	id := uuid.Generate().String()
+
 	//Record the docker network UUID to SDN bridge mapping
 	//This has to survive a plugin crash/restart and needs to be persisted
 	nwMap.m[req.NetworkID] = &nwVal{
@@ -178,6 +408,7 @@ func handlerCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		Gateway: *req.IPv4Data[0].Gateway,
 		Pipeline: pipeline,
 		actionCount: 1,
+		EndpointID: id,
 	}
 
 	if err := dbAdd("nwMap", req.NetworkID, nwMap.m[req.NetworkID]); err != nil {
@@ -205,6 +436,16 @@ func handlerCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if *hostPorts {
+		err = createIpdkNetworkHostPort(req.IPv4Data[0].Gateway.String(), nwMap.m[req.NetworkID])
+		if err != nil {
+			glog.Errorf("ERROR: Unable to add gateway port: [%v]", err)
+			resp.Err = "Error: " + err.Error()
+			sendResponse(resp, w)
+			return
+		}
+	}
+
 	sendResponse(resp, w)
 }
 
@@ -223,6 +464,16 @@ func handlerDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 		resp.Err = "Error: " + err.Error()
 		sendResponse(resp, w)
 		return
+	}
+
+	if *hostPorts {
+		err = deleteIpdkNetworkHostPort(nwMap.m[req.NetworkID])
+		if err != nil {
+			glog.Errorf("ERROR: Unable to add gateway port: [%v]", err)
+			resp.Err = "Error: " + err.Error()
+			sendResponse(resp, w)
+			return
+		}
 	}
 
 	glog.Infof("Delete Network := %v", req.NetworkID)
@@ -1110,6 +1361,8 @@ func initDb() error {
 
 func main() {
 	var err error
+
+	hostPorts = flag.Bool("hostports", false, "Enable veth ports on host for IPDK networks")
 
 	flag.Parse()
 
