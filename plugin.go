@@ -165,10 +165,15 @@ func createIpdkNetworkHostPort(gwString string, nm *nwVal) error {
 	vethServer := generateVethName()
 	vethClient := generateVethName()
 
-	veth := &netlink.Veth{}
-	veth.LinkAttrs.Name = vethClient
-	veth.PeerName = vethServer
-	veth.PeerNamespace = nsID
+	veth := &netlink.Veth{
+		LinkAttrs: netlink.LinkAttrs{
+			Name: vethClient,
+			HardwareAddr: GenerateMac(),
+		},
+		PeerName: 		vethServer,
+		PeerNamespace:		nsID,
+		PeerHardwareAddr: 	GenerateMac(),
+	}
 
 	if err := netlink.LinkAdd(veth); err != nil {
 		glog.Infof("ERROR: Cannot add veth device [%v] ", err)
@@ -239,13 +244,24 @@ func createIpdkNetworkHostPort(gwString string, nm *nwVal) error {
 		return err
 	}
 
-	vethClientMac := l.Attrs().HardwareAddr
-	glog.Infof("INFO: vethClientMac is %s", vethClientMac.String())
-	vethClientIf := l.Attrs().Index
 	if err = netlink.LinkSetUp(l); err != nil {
 		glog.Infof("ERROR: Cannot set veth client interface up [%v] ", err)
 		return err
 	}
+
+	l, err = netlink.LinkByName(vethClient)
+	if err != nil{
+		glog.Infof("ERROR: Error getting veth client [%v] ", err)
+		return err
+	}
+	if l == nil {
+		glog.Infof("ERROR: Cannot find veth client [%v] ", err)
+		return err
+	}
+
+	vethClientMac := l.Attrs().HardwareAddr
+	glog.Infof("INFO: vethClientMac is %s", vethClientMac.String())
+	vethClientIf := l.Attrs().Index
 
 	epMap.m[nm.EndpointID] = &epVal{
 		IP:            ipString[0],
@@ -439,7 +455,7 @@ func handlerCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	if *hostPorts {
 		err = createIpdkNetworkHostPort(req.IPv4Data[0].Gateway.String(), nwMap.m[req.NetworkID])
 		if err != nil {
-			glog.Errorf("ERROR: Unable to add gateway port: [%v]", err)
+			glog.Errorf("ERROR: Unable to add host port port: [%v]", err)
 			resp.Err = "Error: " + err.Error()
 			sendResponse(resp, w)
 			return
@@ -582,11 +598,16 @@ func handlerCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 	vethServer := generateVethName()
 	vethClient := generateVethName()
 
-	veth := &netlink.Veth{}
-	veth.LinkAttrs.Name = vethClient
-	veth.PeerName = vethServer
-	veth.PeerNamespace = nsID
-	//veth.PeerHardwareAddr = GenerateMac()
+	veth := &netlink.Veth{
+		LinkAttrs: netlink.LinkAttrs{
+			Name: vethClient,
+			HardwareAddr: GenerateMac(),
+		},
+		PeerName: 		vethServer,
+		PeerNamespace:		nsID,
+		PeerHardwareAddr: 	GenerateMac(),
+	}
+
 
 	glog.Infof("Adding veth pair (%s/%s) with nsID %d and MAC %s", vethServer, vethClient, veth.PeerNamespace, veth.PeerHardwareAddr)
 
