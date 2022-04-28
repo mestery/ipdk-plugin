@@ -1,3 +1,19 @@
+//
+// Copyright (c) 2022 Intel Corporation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
 package main
 
 import (
@@ -5,15 +21,7 @@ import (
 	"math/rand"
 	"net"
 	"time"
-	go_docker "github.com/fsouza/go-dockerclient"
 )
-
-type VoidResponse struct{}
-
-type Docker struct{
-	client *go_docker.Client
-}
-
 
 func GenerateMac() (net.HardwareAddr) {
 	buf := make([]byte, 6)
@@ -30,7 +38,6 @@ func GenerateMac() (net.HardwareAddr) {
 	return mac
 }
 
-
 func generateVethName() string {
 	n := 6
 	rand.Seed(time.Now().UnixNano())
@@ -41,27 +48,4 @@ func generateVethName() string {
 		b[i] = letterRunes[rand.Intn(len(letterRunes))]
 	}
 	return fmt.Sprintf("veth-%s", string(b))
-}
-
-// GetVMContainer returns the underlying docker container object for a
-// given VM
-func (d *Docker) GetContainerInfo (endpointID string) (*go_docker.Container, error) {
-	containers, err := d.client.ListContainers(go_docker.ListContainersOptions{
-		Filters: map[string][]string{
-			"name": {
-				endpointID,
-			},
-		},
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	// no such container
-	if len(containers) == 0 {
-		return nil, nil
-	}
-
-	return d.client.InspectContainer(containers[0].ID)
 }
