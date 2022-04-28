@@ -22,8 +22,8 @@ func GenerateMac() (net.HardwareAddr) {
 	_, err  := rand.Read(buf)
 	if err != nil {}
 
-	// Set the local bit
-	buf[0] |= 2
+	// Set the local bit, ensure unicast address
+	buf[0] = (buf[0] | 2) & 0xfe
 
 	mac = append(mac, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5])
 
