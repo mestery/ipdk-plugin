@@ -786,8 +786,6 @@ func handlerDeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 		glog.Errorf("Unable to update db %v %v", err, m)
 	}
 
-	// Need to delete port using openconfig when we can
-
 	sendResponse(resp, w)
 }
 
@@ -800,26 +798,6 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 		sendResponse(resp, w)
 		return
 	}
-
-	//Generate IPDK vhost-user interface:
-	//docker exec -it ipdk gnmi-cli set "device:virtual-device,name:net_vhost0,host:host1,device-type:VIRTIO_NET,queues:1,socket-path:/tmp/vhost-user-0,port-type:LINK"
-	//cmd := "docker"
-	//args := []string{"exec", "ipdk", "gnmi-cli", "set", fmt.Sprintf("device:virtual-device,name:%s,pipeline-name:pipe,mtu:1500,port-type:TAP", netname)}
-	//glog.Infof("INFO: Running command [%v] with args [%v]", cmd, args)
-	//if err := exec.Command(cmd, args...).Run(); err != nil {
-	//output, err := exec.Command(cmd, args...).Output()
-	//if err != nil {
-		//glog.Infof("ERROR: [%v] [%v] [%v] ", cmd, args, err)
-		//resp.Err = fmt.Sprintf("Error EndPointCreate: [%v] [%v] [%v]",
-			//cmd, args, err)
-		//sendResponse(resp, w)
-		//return
-	//}
-
-	//ifcb, _, err := bufio.NewReader(bytes.NewReader(output)).ReadLine()
-	//ifc := string(ifcb)
-
-	//glog.Infof("INFO: Result of gnmi-cli command [%v]", ifc)
 
 	req := api.JoinRequest{}
 	if err := json.Unmarshal(body, &req); err != nil {
