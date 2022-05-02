@@ -31,7 +31,7 @@ import (
 	"time"
 
 	"github.com/01org/ciao/uuid"
-	"github.com/boltdb/bolt"
+	bolt "go.etcd.io/bbolt"
 	"github.com/moby/libnetwork/drivers/remote/api"
 	ipamapi "github.com/docker/libnetwork/ipams/remote/api"
 	goipam "github.com/metal-stack/go-ipam"
