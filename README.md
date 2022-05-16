@@ -3,7 +3,8 @@
 # ipdk ebpf docker network plugin
 
 This is a simple Docker CNI which integrates with the [IPDK](https://ipdk.io)
-project. Specifically, it works with the IPDK P4 eBPF backend.
+project. Specifically, it works with the
+[IPDK P4 eBPF backend](https://github.com/ipdk-io/ipdk/tree/main/build/networking_ebpf).
 
 For more information about IPDK:
 
