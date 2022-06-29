@@ -289,7 +289,7 @@ func createIpdkNetworkHostPort(gwString string, nm *nwVal) error {
 
 	var out bytes.Buffer
 	var stderr bytes.Buffer
-	cmd2 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "action-selector", "add_member", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_as", "id", "1", "data",
+	cmd2 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "action-selector", "add-member", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_as", "action", "id", "1", "data",
 		fmt.Sprintf("%d", vethServerIf), fmt.Sprintf("%s", vethServerMac.String()), fmt.Sprintf("%s", vethClientMac.String()))
 	cmd2.Stdout = &out
 	cmd2.Stderr = &stderr
@@ -315,7 +315,7 @@ func createIpdkNetworkHostPort(gwString string, nm *nwVal) error {
                 return err
 	}
 
-	cmd4 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_arp_ipv4", "id", "2", "key",
+	cmd4 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_arp_ipv4", "action", "id", "2", "key",
 		fmt.Sprintf("%d", vethServerIf), "1", fmt.Sprintf("%s/%s", ipString[0], ipString[1]), "data", fmt.Sprintf("%s", vethServerMac.String()))
 	cmd4.Stdout = &out
 	cmd4.Stderr = &stderr
@@ -833,7 +833,7 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 
 	var out bytes.Buffer
 	var stderr bytes.Buffer
-	cmd2 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "action-selector", "add_member", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_as", "id", "1", "data",
+	cmd2 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "action-selector", "add-member", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_as", "action", "id", "1", "data",
 		fmt.Sprintf("%d", em.vethServerIf), fmt.Sprintf("%s", em.vethServerMac.String()), fmt.Sprintf("%s", em.vethClientMac.String()))
 	cmd2.Stdout = &out
 	cmd2.Stderr = &stderr
@@ -863,7 +863,7 @@ func handlerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd4 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_arp_ipv4", "id", "2", "key",
+	cmd4 := exec.Command("docker", "exec", "ipdk", "psabpf-ctl", "table", "add", "pipe", fmt.Sprintf("%d", nm.Pipeline), "DemoIngress_tbl_arp_ipv4", "action", "id", "2", "key",
 		fmt.Sprintf("%d", em.vethServerIf), "1", fmt.Sprintf("%s/%s", em.IP, em.mask), "data", fmt.Sprintf("%s", em.vethServerMac.String()))
 	cmd4.Stdout = &out
 	cmd4.Stderr = &stderr
